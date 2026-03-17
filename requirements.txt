@@ -1,0 +1,2 @@
+# Smart Doc Generator - Dependencies
+# No external dependencies required - uses Python's built-in ast module
