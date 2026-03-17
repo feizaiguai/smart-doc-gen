@@ -1,2 +1,2 @@
-# Smart Doc Generator - Dependencies
-# No external dependencies required - uses Python's built-in ast module
+# Smart Doc Generator - 依赖包
+# 无外部依赖，纯标准库实现

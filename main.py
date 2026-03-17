@@ -1,226 +1,301 @@
 #!/usr/bin/env python3
 """
 Smart Doc Generator - 自动从源代码生成 API 文档
-Author: 196408245@qq.com
+功能：分析 Python/JS/TS 代码，生成 Markdown 格式的 API 文档
+作者: 196408245@qq.com
 """
 
-import ast
 import os
 import re
+import ast
 import argparse
 from pathlib import Path
 from typing import List, Dict, Optional
-from datetime import datetime
+from dataclasses import dataclass
 
 
-class DocGenerator:
-    """文档生成器核心类"""
+@dataclass
+class FunctionInfo:
+    """函数信息"""
+    name: str
+    docstring: str
+    args: List[str]
+    returns: Optional[str]
+    decorators: List[str]
+
+
+class CodeAnalyzer:
+    """代码分析器基类"""
     
-    def __init__(self, source_path: str, output_path: str = "docs"):
-        self.source_path = Path(source_path)
-        self.output_path = Path(output_path)
-        self.output_path.mkdir(parents=True, exist_ok=True)
-        
-    def extract_docstring(self, node: ast.AST) -> Optional[str]:
-        """提取文档字符串"""
-        if isinstance(node, ast.FunctionDef) and ast.get_docstring(node):
-            return ast.get_docstring(node)
-        if isinstance(node, ast.ClassDef) and ast.get_docstring(node):
-            return ast.get_docstring(node)
+    def extract_functions(self, filepath: str) -> List[FunctionInfo]:
+        raise NotImplementedError
+
+
+class PythonAnalyzer(CodeAnalyzer):
+    """Python 代码分析器"""
+    
+    def extract_functions(self, filepath: str) -> List[FunctionInfo]:
+        """从 Python 文件提取函数信息"""
+        functions = []
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                tree = ast.parse(f.read())
+            
+            for node in ast.walk(tree):
+                if isinstance(node, ast.FunctionDef):
+                    func_info = FunctionInfo(
+                        name=node.name,
+                        docstring=ast.get_docstring(node) or '',
+                        args=[arg.arg for arg in node.args.args],
+                        returns=self._get_return_annotation(node),
+                        decorators=[dec.id if isinstance(dec, ast.Name) else str(dec) 
+                                   for dec in node.decorator_list]
+                    )
+                    functions.append(func_info)
+        except Exception as e:
+            print(f"Error parsing {filepath}: {e}")
+        return functions
+    
+    def _get_return_annotation(self, node: ast.FunctionDef) -> Optional[str]:
+        """获取返回类型注解"""
+        if node.returns:
+            return ast.unparse(node.returns)
         return None
+
+
+class JavaScriptAnalyzer(CodeAnalyzer):
+    """JavaScript/TypeScript 代码分析器"""
     
-    def get_function_signature(self, node: ast.FunctionDef) -> str:
-        """获取函数签名"""
-        args = node.args
-        params = []
-        
-        # 处理普通参数
-        for arg in args.args:
-            param_name = arg.arg
-            param_type = self._get_type_annotation(arg.annotation)
-            if param_type:
-                params.append(f"{param_name}: {param_type}")
-            else:
-                params.append(param_name)
-        
-        # 处理 *args 和 **kwargs
-        if args.vararg:
-            params.append(f"*{args.vararg.arg}")
-        if args.kwarg:
-            params.append(f"**{args.kwarg.arg}")
-        
-        return f"({', '.join(params)})"
-    
-    def _get_type_annotation(self, annotation) -> Optional[str]:
-        """获取类型注解"""
-        if annotation is None:
-            return None
-        return ast.unparse(annotation)
-    
-    def get_class_methods(self, node: ast.ClassDef) -> List[Dict]:
-        """获取类的所有方法"""
-        methods = []
-        for item in node.body:
-            if isinstance(item, ast.FunctionDef):
-                method_info = {
-                    'name': item.name,
-                    'signature': self.get_function_signature(item),
-                    'docstring': self.extract_docstring(item),
-                    'is_static': any(isinstance(d, ast.StaticMethod) for d in item.decorator_list),
-                    'is_classmethod': any(isinstance(d, ast.ClassMethod) for d in item.decorator_list),
-                }
-                methods.append(method_info)
-        return methods
-    
-    def parse_file(self, filepath: Path) -> Dict:
-        """解析单个 Python 文件"""
+    def extract_functions(self, filepath: str) -> List[FunctionInfo]:
+        """从 JS/TS 文件提取函数信息"""
+        functions = []
         try:
             with open(filepath, 'r', encoding='utf-8') as f:
                 content = f.read()
             
-            tree = ast.parse(content)
-            module_doc = ast.get_docstring(tree)
+            # 匹配函数声明: function name(args) { ... }
+            pattern1 = r'function\s+(\w+)\s*\(([^)]*)\)\s*\{([^}]*?)(?:\n\s*})'
+            matches1 = re.findall(pattern1, content, re.MULTILINE | re.DOTALL)
             
-            classes = []
-            functions = []
+            for match in matches1:
+                name, args, body = match
+                docstring = self._extract_js_docstring(body)
+                functions.append(FunctionInfo(
+                    name=name,
+                    docstring=docstring,
+                    args=[a.strip() for a in args.split(',') if a.strip()],
+                    returns=None,
+                    decorators=[]
+                ))
             
-            for node in ast.walk(tree):
-                if isinstance(node, ast.ClassDef):
-                    class_info = {
-                        'name': node.name,
-                        'docstring': self.extract_docstring(node),
-                        'methods': self.get_class_methods(node),
-                        'bases': [ast.unparse(base) for base in node.bases if isinstance(base, ast.Name)]
-                    }
-                    classes.append(class_info)
-                elif isinstance(node, ast.FunctionDef) and node.col_offset == 0:
-                    # 模块级函数
-                    func_info = {
-                        'name': node.name,
-                        'signature': self.get_function_signature(node),
-                        'docstring': self.extract_docstring(node)
-                    }
-                    functions.append(func_info)
+            # 匹配箭头函数: const name = (args) => ...
+            pattern2 = r'const\s+(\w+)\s*=\s*\(([^)]*)\)\s*=>'
+            matches2 = re.findall(pattern2, content)
             
-            return {
-                'filepath': str(filepath),
-                'module_doc': module_doc,
-                'classes': classes,
-                'functions': functions
-            }
-            
+            for match in matches2:
+                name, args = match
+                if not any(f.name == name for f in functions):
+                    functions.append(FunctionInfo(
+                        name=name,
+                        docstring='',
+                        args=[a.strip() for a in args.split(',') if a.strip()],
+                        returns=None,
+                        decorators=[]
+                    ))
+                    
         except Exception as e:
             print(f"Error parsing {filepath}: {e}")
-            return {'filepath': str(filepath), 'error': str(e), 'classes': [], 'functions': []}
+        return functions
     
-    def generate_class_docs(self, class_info: Dict) -> str:
-        """生成类的文档"""
-        md = f"\n### Class: `{class_info['name']}`\n"
-        
-        if class_info['bases']:
-            md += f"*Inherits from: {', '.join(class_info['bases'])}*\n"
-        
-        if class_info['docstring']:
-            md += f"\n{class_info['docstring']}\n"
-        
-        if class_info['methods']:
-            md += "\n**Methods:**\n"
-            for method in class_info['methods']:
-                md += f"\n#### `{method['name']}{method['signature']}`\n"
-                if method['is_static']:
-                    md += "*@staticmethod*\n"
-                elif method['is_classmethod']:
-                    md += "*@classmethod*\n"
-                if method['docstring']:
-                    md += f"{method['docstring']}\n"
-        
-        return md
+    def _extract_js_docstring(self, body: str) -> str:
+        """提取 JS 文档注释"""
+        match = re.search(r'/\*\*\s*\n(.*?)\n\s*\*/', body, re.DOTALL)
+        if match:
+            lines = match.group(1).split('\n')
+            return '\n'.join(line.strip().lstrip('*') for line in lines)
+        return ''
+
+
+class DocumentationGenerator:
+    """文档生成器"""
     
-    def generate_function_docs(self, func_info: Dict) -> str:
-        """生成函数的文档"""
-        md = f"\n### Function: `{func_info['name']}{func_info['signature']}`\n"
-        if func_info['docstring']:
-            md += f"\n{func_info['docstring']}\n"
-        return md
+    def __init__(self, project_name: str, author: str, description: str = ""):
+        self.project_name = project_name
+        self.author = author
+        self.description = description
     
-    def generate_markdown(self, parsed_data: Dict) -> str:
-        """生成 Markdown 文档"""
-        filename = Path(parsed_data['filepath']).stem
-        md = f"# {filename.title()} 模块文档\n\n"
-        md += f"*Generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*\n\n"
+    def generate_markdown(self, functions: List[FunctionInfo], 
+                         source_file: str) -> str:
+        """生成 Markdown 格式文档"""
+        lines = [
+            f"# {self.project_name} API Documentation",
+            "",
+            f"**Source File:** `{source_file}`",
+            "",
+            f"**Generated by:** Smart Doc Generator",
+            "",
+            "---",
+            "",
+            "## Table of Contents",
+        ]
         
-        if parsed_data.get('error'):
-            md += f"⚠️ **Error parsing file:** {parsed_data['error']}\n"
-            return md
+        # 生成目录
+        for i, func in enumerate(functions, 1):
+            lines.append(f"{i}. [{func.name}](#{func.name.replace('_', '-')})")
+        lines.append("")
         
-        if parsed_data.get('module_doc'):
-            md += f"## 模块说明\n\n{parsed_data['module_doc']}\n"
+        # 生成函数文档
+        lines.append("---")
+        lines.append("")
+        lines.append("## Functions")
+        lines.append("")
         
-        # 模块级函数
-        if parsed_data['functions']:
-            md += "\n## 模块函数\n"
-            for func in parsed_data['functions']:
-                md += self.generate_function_docs(func)
+        for func in functions:
+            lines.append(f"### `{func.name}`")
+            lines.append("")
+            
+            if func.decorators:
+                lines.append("**Decorators:** " + 
+                           ", ".join(f"`@{d}`" for d in func.decorators))
+                lines.append("")
+            
+            # 参数
+            if func.args:
+                lines.append("**Parameters:**")
+                lines.append("")
+                for arg in func.args:
+                    lines.append(f"- `{arg}`")
+                lines.append("")
+            
+            # 返回值
+            if func.returns:
+                lines.append(f"**Returns:** `{func.returns}`")
+                lines.append("")
+            
+            # 文档字符串
+            if func.docstring:
+                lines.append("**Description:**")
+                lines.append("")
+                lines.append(func.docstring)
+                lines.append("")
         
-        # 类
-        if parsed_data['classes']:
-            md += "\n## 类\n"
-            for cls in parsed_data['classes']:
-                md += self.generate_class_docs(cls)
-        
-        return md
+        return '\n'.join(lines)
+
+
+class SmartDocGenerator:
+    """智能文档生成器主类"""
     
-    def process(self) -> List[str]:
-        """处理所有 Python 文件并生成文档"""
-        output_files = []
+    SUPPORTED_EXTENSIONS = {
+        '.py': PythonAnalyzer,
+        '.js': JavaScriptAnalyzer,
+        '.ts': JavaScriptAnalyzer,
+        '.jsx': JavaScriptAnalyzer,
+        '.tsx': JavaScriptAnalyzer,
+    }
+    
+    def __init__(self, author: str = ""):
+        self.author = author
+    
+    def analyze_file(self, filepath: str) -> List[FunctionInfo]:
+        """分析单个文件"""
+        ext = Path(filepath).suffix.lower()
+        analyzer_class = self.SUPPORTED_EXTENSIONS.get(ext)
         
-        if self.source_path.is_file():
-            files = [self.source_path]
+        if not analyzer_class:
+            print(f"Unsupported file type: {ext}")
+            return []
+        
+        analyzer = analyzer_class()
+        return analyzer.extract_functions(filepath)
+    
+    def generate_docs(self, source_path: str, output_path: str = None,
+                     project_name: str = None) -> str:
+        """生成文档"""
+        source_path = Path(source_path)
+        
+        if not source_path.exists():
+            raise FileNotFoundError(f"Source path not found: {source_path}")
+        
+        # 确定项目名
+        if not project_name:
+            project_name = source_path.stem if source_path.is_file() else source_path.name
+        
+        # 收集所有函数
+        all_functions = []
+        
+        if source_path.is_file():
+            all_functions = self.analyze_file(str(source_path))
         else:
-            files = list(self.source_path.rglob("*.py"))
+            for ext, _ in self.SUPPORTED_EXTENSIONS.items():
+                for filepath in source_path.rglob(f'*{ext}'):
+                    funcs = self.analyze_file(str(filepath))
+                    for f in funcs:
+                        all_functions.append(f)
         
-        for filepath in files:
-            # 跳过 __pycache__ 和测试文件
-            if '__pycache__' in str(filepath) or filepath.name.startswith('test_'):
-                continue
-            
-            print(f"Processing: {filepath}")
-            parsed = self.parse_file(filepath)
-            md_content = self.generate_markdown(parsed)
-            
-            # 生成输出文件名
-            rel_path = filepath.relative_to(self.source_path) if self.source_path.is_dir() else filepath.name
-            output_file = self.output_path / f"{rel_path.stem}.md"
-            output_file.parent.mkdir(parents=True, exist_ok=True)
-            
-            with open(output_file, 'w', encoding='utf-8') as f:
-                f.write(md_content)
-            
-            output_files.append(str(output_file))
-            print(f"  -> Generated: {output_file}")
+        # 生成文档
+        generator = DocumentationGenerator(
+            project_name=project_name,
+            author=self.author,
+            description=f"Auto-generated documentation for {project_name}"
+        )
         
-        return output_files
+        doc = generator.generate_markdown(all_functions, str(source_path))
+        
+        # 保存文档
+        if output_path:
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write(doc)
+            print(f"Documentation saved to: {output_path}")
+        
+        return doc
 
 
 def main():
-    """主入口"""
-    parser = argparse.ArgumentParser(description='Smart Doc Generator - 从源代码自动生成 API 文档')
-    parser.add_argument('source', help='源代码文件或目录路径')
-    parser.add_argument('-o', '--output', default='docs', help='输出目录 (默认: docs)')
-    parser.add_argument('-v', '--version', action='version', version='Smart Doc Generator v1.0.0')
+    """主函数"""
+    parser = argparse.ArgumentParser(
+        description='Smart Doc Generator - 自动从源代码生成 API 文档',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python main.py --source ./src --output docs/api.md --name "MyProject"
+  python main.py --source main.py --output README.md
+  python main.py --source ./src --recursive
+        """
+    )
+    
+    parser.add_argument('--source', '-s', required=True,
+                       help='Source file or directory to analyze')
+    parser.add_argument('--output', '-o',
+                       help='Output file path for generated documentation')
+    parser.add_argument('--name', '-n',
+                       help='Project name for documentation')
+    parser.add_argument('--recursive', '-r', action='store_true',
+                       help='Recursively scan directories')
     
     args = parser.parse_args()
     
-    if not os.path.exists(args.source):
-        print(f"Error: Source path '{args.source}' does not exist")
-        return
+    # 创建生成器
+    generator = SmartDocGenerator(author="196408245@qq.com")
     
-    generator = DocGenerator(args.source, args.output)
-    output_files = generator.process()
+    try:
+        # 生成文档
+        doc = generator.generate_docs(
+            source_path=args.source,
+            output_path=args.output,
+            project_name=args.name
+        )
+        
+        if not args.output:
+            print(doc)
+        else:
+            print("Documentation generated successfully!")
+            
+    except Exception as e:
+        print(f"Error: {e}")
+        return 1
     
-    print(f"\n✅ Successfully generated {len(output_files)} documentation files!")
-    print(f"📁 Output directory: {args.output}")
+    return 0
 
 
-if __name__ == "__main__":
-    main()
+if __name__ == '__main__':
+    exit(main())
